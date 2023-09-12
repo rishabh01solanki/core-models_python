@@ -135,7 +135,7 @@ coreml_model = ct.convert(model)
 coreml_model.save(coreml_model_path)
 print("CoreML Model saved!")
 
-import coremltools
+
 
 def make_updatable(mlmodel_url, mlmodel_updatable_path):
     # Load the model

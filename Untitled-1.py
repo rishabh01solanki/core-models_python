@@ -2,148 +2,176 @@
 import os
 import numpy as np
 from keras.preprocessing.image import ImageDataGenerator
-from keras.models import Sequential
-from keras.layers import Conv2D, MaxPooling2D
-from keras.layers import Activation, Dropout, Flatten, Dense
+from keras.models import Sequential, Model, load_model
+from keras.layers import Conv2D, MaxPooling2D, Dense, Activation, Flatten, Dropout
+from sklearn.ensemble import RandomForestClassifier
+import matplotlib.pyplot as plt
+import coremltools as ct  # Ensure coremltools is installed
 
 
 # %%
 # Directory
 train_data_dir = '/Users/rishabhsolanki/Desktop/Machine learning/ios/Data/train_data'
+
 # Image dimensions
 img_width, img_height = 150, 150
-batch_size = 5  # Adjust this as per the computation capacity of your system
+batch_size = 5
 
 
 # %%
-# Initialize ImageDataGenerator with validation split
+# ImageDataGenerator
 train_datagen = ImageDataGenerator(
     rescale=1./255,
-    rotation_range=10,
-    width_shift_range=0.1,
-    height_shift_range=0.1,
-    zoom_range=0.1,
-    validation_split=0.2  # Using 20% of the data for validation
+    rotation_range=15,
+    validation_split=0.2
 )
 
-# Configure the train_generator for training data
+# Training and Validation Generators
 train_generator = train_datagen.flow_from_directory(
     train_data_dir,
     target_size=(img_width, img_height),
     batch_size=batch_size,
     class_mode='binary',
-    subset='training'  # Specify this subset for training data
+    subset='training'
 )
 
-# Configure the val_generator for validation data
 val_generator = train_datagen.flow_from_directory(
     train_data_dir,
     target_size=(img_width, img_height),
     batch_size=batch_size,
     class_mode='binary',
-    subset='validation'  # Specify this subset for validation data
+    subset='validation'
 )
 
-# %%
-# Model definition
-model = Sequential()
-model.add(Conv2D(32, (3, 3), input_shape=(img_width, img_height, 3)))
-model.add(Activation('relu'))
-model.add(MaxPooling2D(pool_size=(2, 2)))
-
-model.add(Conv2D(32, (3, 3)))
-model.add(Activation('relu'))
-model.add(MaxPooling2D(pool_size=(2, 2)))
-
-model.add(Conv2D(64, (3, 3)))
-model.add(Activation('relu'))
-model.add(MaxPooling2D(pool_size=(2, 2)))
-
-model.add(Flatten())
-model.add(Dense(64))
-model.add(Activation('relu'))
-model.add(Dropout(0.5))
-model.add(Dense(1))
-model.add(Activation('sigmoid'))
 
 # %%
-from keras.optimizers import Adam  # or any other optimizer you want to use
+from keras.applications.mobilenet_v2 import MobileNetV2
+from keras.models import Model, Sequential
+from keras.layers import Input, Conv2D, Activation, MaxPooling2D, Flatten, Dense, Dropout
 
-# Define the learning rate
-learning_rate = 0.01
+# Create a custom input tensor
+input_tensor = Input(shape=(img_width, img_height, 3), name='conv2d_input')
 
-# Instantiate the optimizer with the desired learning rate
-optimizer = Adam(learning_rate=learning_rate)
+# Add MobileNetV2 as base model using custom input tensor
+base_model = MobileNetV2(weights='imagenet', include_top=False, input_tensor=input_tensor)
 
-# Now, use this optimizer while compiling the model
-model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+# Define a modified simplified CNN model to add on top
+model_top = Sequential([
+    Conv2D(4, (1, 1), use_bias=False, kernel_initializer='uniform', activation='relu', input_shape=base_model.output_shape[1:]),
+    MaxPooling2D(1, 1),
+    Flatten(),
+    Dense(4, activation='relu', kernel_initializer='uniform'),
+    Dropout(0.2),
+    Dense(1, activation='sigmoid') # use 'softmax' for multi-class and adjust the units accordingly
+])
 
+# Combine MobileNetV2 output with the top model
+predictions = model_top(base_model.output)
+
+# Combine the input tensor and final output layer into the final model
+model = Model(inputs=input_tensor, outputs=predictions)
+
+# Freeze the layers of the MobileNetV2 model
+for layer in base_model.layers:
+    layer.trainable = False
+
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
 # %%
-# Train the model
+# Train Model
 model.fit(
     train_generator,
     steps_per_epoch=train_generator.samples // batch_size,
-    epochs=20,
+    epochs=8,
     validation_data=val_generator,
     validation_steps=val_generator.samples // batch_size
 )
 
 # %%
-from sklearn.ensemble import RandomForestClassifier
-from keras.models import Sequential, Model
-
-# %%
-
-# Extract features using the CNN
-feature_model = Model(inputs=model.input, outputs=model.layers[-4].output)  # Extracting features before Flatten layer
-train_features = feature_model.predict(train_generator)
-val_features = feature_model.predict(val_generator)
-
-
-
-# %%
-# Train a RandomForest using these features
-clf = RandomForestClassifier(n_estimators=100)
-clf.fit(train_features, train_generator.classes)
-
-
-# %%
-# Get the images and labels from the validation generator
+# Predictions
 val_images, val_labels = next(val_generator)
-
-# Predict using CNN
 cnn_predictions = model.predict(val_images)
 
-# Extract features from these images using the CNN
-val_features = feature_model.predict(val_images)
-
-# Predict using RandomForest
-rf_predictions = clf.predict(val_features)
 
 # %%
-# Combining predictions with equal weightage
-final_predictions = 0.5 * cnn_predictions.flatten() + 0.5 * rf_predictions
-
-# Convert combined predictions to binary class labels
-final_class_predictions = [1 if pred > 0.5 else 0 for pred in final_predictions]
-
-
-# %%
-# Print the results
+# Display Results
 print("True Labels:", val_labels)
 print("CNN Predictions:", cnn_predictions.flatten())
-print("RandomForest Predictions:", rf_predictions)
-print("Combined Predictions:", final_class_predictions)
 
 # %%
-import matplotlib.pyplot as plt
-
 # Visualize the results
 for i in range(len(val_images)):
     plt.imshow(val_images[i])
-    plt.title(f"True: {int(val_labels[i])}, CNN: {cnn_predictions[i][0]:.2f}, RF: {rf_predictions[i]}, Combined: {final_class_predictions[i]}")
+    plt.title(f"True: {int(val_labels[i])}, CNN: {cnn_predictions[i][0]:.2f}")
     plt.show()
+
+# %%
+import coremltools
+from coremltools.models.neural_network import NeuralNetworkBuilder, SgdParams
+
+# %%
+# Save the Keras model first
+keras_model_path = './model.h5'
+model.save(keras_model_path)
+
+# %%
+# If the model expects 3 channels, adjust the input shape and preprocessing details
+input_shape = (1, 150, 150, 3)
+input_shape_spec = ct.Shape(shape=input_shape)
+input_spec = ct.ImageType(shape=input_shape_spec, bias=[0, 0, 0], scale=1/255.0)
+input_spec.name = "conv2d_input"
+
+
+# %%
+# Convert the Keras model to CoreML model with specified input details
+coreml_model_path = './MyModel.mlmodel'
+coreml_model = ct.convert(model, inputs=[input_spec], source="tensorflow")
+coreml_model.save(coreml_model_path)
+print("CoreML Model saved!")
+
+
+# %%
+def make_updatable(mlmodel_url, mlmodel_updatable_path):
+    # Load the model
+    spec = ct.utils.load_spec(mlmodel_url)
+    builder = ct.models.neural_network.NeuralNetworkBuilder(spec=spec)
+
+    # Inspect the last few layers
+    print(builder.inspect_layers(last=5))
+
+    # Make the last two dense layers updatable
+    builder.make_updatable(['model_4/sequential_4/dense_8/BiasAdd' , 'model_4/sequential_4/dense_9/BiasAdd'])  # Adjust names if they differ in your model
+
+    # Retrieve name of the output of the last layer
+    last_layer_output = builder.spec.neuralNetwork.layers[-1].output[0]
+
+    # Add the softmax layer
+    builder.add_softmax(name='SoftmaxLayer', input_name=last_layer_output, output_name='output1')
+
+    # Set the loss and optimizer
+    builder.set_categorical_cross_entropy_loss(name='lossLayer', input='output1')  # 'output1' is the output of the softmax layer
+    builder.set_sgd_optimizer(SgdParams(lr=0.01, batch=1))
+    builder.set_epochs(5)
+
+    # Set training input descriptions
+    spec.description.trainingInput[0].shortDescription = 'Input image for training'
+    spec.description.trainingInput[1].shortDescription = 'True label for the input image'
+    
+    # Save the updated model
+    updatable_model = ct.models.MLModel(spec)
+    updatable_model.save(mlmodel_updatable_path)
+
+# %%
+coreml_updatable_model_path = './UpdatableModel.mlmodel'
+make_updatable(coreml_model_path, coreml_updatable_model_path)
+
+# %%
+# Verify the model's updatable layers, loss, and optimizer
+builder = coremltools.models.neural_network.NeuralNetworkBuilder(spec=coremltools.utils.load_spec(coreml_updatable_model_path))
+builder.inspect_loss_layers()
+builder.inspect_optimizer()
+# let's see which layers are updatable
+builder.inspect_updatable_layers()
 
 
 
